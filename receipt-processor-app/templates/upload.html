@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Receipt</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Receipt Processing Result</h1>
+        
+        {% if error %}
+            <div class="error">
+                <h2>Error:</h2>
+                <p>{{ error }}</p>
+            </div>
+        {% endif %}
+        
+        {% if receipt_data %}
+            <div class="success">
+                <h2>Processed Receipt Data:</h2>
+                <pre>{{ receipt_data | tojson(indent=2) }}</pre>
+            </div>
+        {% endif %}
+        
+        {% if firebase_result %}
+            <div class="firebase-result">
+                <h3>Firebase Save Result:</h3>
+                <pre>{{ firebase_result | tojson(indent=2) }}</pre>
+            </div>
+        {% endif %}
+        
+        <div class="upload-another">
+            <h3>Upload Another Receipt</h3>
+            <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
+                <label for="file">Choose an image or PDF file:</label>
+                <input type="file" id="file" name="file" accept="image/*,application/pdf" required>
+                <button type="submit">Upload</button>
+            </form>
+        </div>
+        
+        <a href="{{ url_for('index') }}">← Back to Home</a>
+    </div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receipt Processor</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .user-info {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logout-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .logout-btn:hover {
+            background: #c82333;
+        }
+        #auth-required {
+            display: none;
+            text-align: center;
+            padding: 50px;
+        }
+        #main-content {
+            display: none;
+        }
+        .auth-button {
+            display: inline-block; 
+            padding: 12px 24px; 
+            background: #007bff; 
+            color: white; 
+            text-decoration: none; 
+            border-radius: 5px;
+            margin: 10px;
+        }
+        .google-button {
+            background: #db4437;
+        }
+        .google-button:hover {
+            background: #c23321;
+        }
+        .status-indicator {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            color: white;
+            display: none;
+            z-index: 1000;
+        }
+        .status-online {
+            background: #28a745;
+        }
+        .status-refreshing {
+            background: #ffc107;
+            color: #333;
+        }
+        .status-error {
+            background: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Status Indicator -->
+        <div id="status-indicator" class="status-indicator">
+            <span id="status-text">Connected</span>
+        </div>
+
+        <!-- Authentication Required Message -->
+        <div id="auth-required">
+            <h1>Authentication Required</h1>
+            <p>Please sign in to use the receipt processor.</p>
+            <div>
+                <a href="/login" class="auth-button">Sign In with Email</a>
+                <button id="google-sign-in-main" class="auth-button google-button">Sign In with Google</button>
+            </div>
+        </div>
+
+        <!-- Main Content (shown when authenticated) -->
+        <div id="main-content">
+            <div class="user-info" id="user-info" style="display: none;">
+                <span>Welcome, <span id="user-email"></span>!</span>
+                <div>
+                    <button class="logout-btn" style="background: #6c757d; margin-right: 10px;" onclick="refreshSession()">Refresh Session</button>
+                    <button class="logout-btn" onclick="logout()">Logout</button>
+                </div>
+            </div>
+
+            <h1>Upload Receipt</h1>
+            <form id="upload-form" enctype="multipart/form-data">
+                <input type="file" name="file" accept="image/*,application/pdf" required>
+                <button type="submit">Upload and Process</button>
+            </form>
+
+            <div id="upload-result" style="display: none; margin-top: 20px;">
+                <h2>Processing Result:</h2>
+                <pre id="result-content"></pre>
+            </div>
+
+            <div style="margin-top: 30px;">
+                <a href="/receipts" id="view-receipts-link">View My Receipts (JSON)</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+    
+    <script>
+        // Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyCQ_jGHZ0-EUwqAKN1q61rjRsfnjeoem20",
+            authDomain: "receipts-ocr-3381a.firebaseapp.com",
+            projectId: "receipts-ocr-3381a",
+            storageBucket: "receipts-ocr-3381a.firebasestorage.app",
+            messagingSenderId: "865796812966",
+            appId: "1:865796812966:web:daddc0cfa0fe8385970467",
+            measurementId: "G-EPMKJ5VG6D"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        
+        // Configure Google provider
+        const googleProvider = new firebase.auth.GoogleAuthProvider();
+        googleProvider.addScope('email');
+        googleProvider.addScope('profile');
+        
+        // Set custom parameters to help with COOP issues
+        googleProvider.setCustomParameters({
+            prompt: 'select_account'
+        });
+
+        let currentUser = null;
+        let idToken = null;
+        let tokenRefreshInterval = null;
+
+        // Status indicator functions
+        function showStatus(message, type = 'online') {
+            const indicator = document.getElementById('status-indicator');
+            const text = document.getElementById('status-text');
+            
+            text.textContent = message;
+            indicator.className = `status-indicator status-${type}`;
+            indicator.style.display = 'block';
+            
+            // Auto-hide after 3 seconds for non-error messages
+            if (type !== 'error') {
+                setTimeout(() => {
+                    indicator.style.display = 'none';
+                }, 3000);
+            }
+        }
+
+        function hideStatus() {
+            document.getElementById('status-indicator').style.display = 'none';
+        }
+
+        // Monitor authentication state
+        auth.onAuthStateChanged(async (user) => {
+            if (user) {
+                currentUser = user;
+                try {
+                    showStatus('Authenticating...', 'refreshing');
+                    
+                    // Force refresh the token to ensure it's valid
+                    idToken = await user.getIdToken(true);
+                    localStorage.setItem('firebase_token', idToken);
+                    showMainContent(user);
+                    
+                    // Start automatic token refresh every 30 minutes
+                    startTokenRefresh();
+                } catch (error) {
+                    console.error('Error getting ID token:', error);
+                    showStatus('Authentication failed', 'error');
+                    showAuthRequired();
+                }
+            } else {
+                currentUser = null;
+                idToken = null;
+                localStorage.removeItem('firebase_token');
+                stopTokenRefresh();
+                showAuthRequired();
+            }
+        });
+
+        // Function to start automatic token refresh
+        function startTokenRefresh() {
+            // Clear any existing interval
+            if (tokenRefreshInterval) {
+                clearInterval(tokenRefreshInterval);
+            }
+            
+            showStatus('Session active', 'online');
+            
+            // Refresh token every 15 minutes (900000 ms) to be more proactive
+            tokenRefreshInterval = setInterval(async () => {
+                console.log('Refreshing Firebase token...');
+                showStatus('Refreshing session...', 'refreshing');
+                
+                const freshToken = await getFreshToken();
+                if (!freshToken) {
+                    console.error('Failed to refresh token, signing out user');
+                    showStatus('Session expired', 'error');
+                    setTimeout(() => {
+                        auth.signOut();
+                    }, 2000);
+                } else {
+                    showStatus('Session refreshed', 'online');
+                }
+            }, 15 * 60 * 1000); // 15 minutes
+        }
+
+        // Function to stop automatic token refresh
+        function stopTokenRefresh() {
+            if (tokenRefreshInterval) {
+                clearInterval(tokenRefreshInterval);
+                tokenRefreshInterval = null;
+            }
+            hideStatus();
+        }
+
+        // Function to validate session before long operations
+        async function validateSession() {
+            try {
+                const token = await getFreshToken();
+                if (!token) return { valid: false, error: 'No token available' };
+
+                console.log('Validating session with token:', token.substring(0, 50) + '...');
+
+                const response = await fetch('/validate-session', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                console.log('Validate session response status:', response.status);
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+                    console.error('Session validation failed:', errorData);
+                    return { valid: false, error: errorData.message || errorData.error || 'Session validation failed' };
+                }
+
+                const result = await response.json();
+                console.log('Session validation result:', result);
+                
+                if (result.valid && result.token_info && result.token_info.expires_soon) {
+                    console.log('Token expires soon, refreshing...');
+                    showStatus('Refreshing session...', 'refreshing');
+                    const freshToken = await getFreshToken();
+                    if (!freshToken) {
+                        return { valid: false, error: 'Failed to refresh token' };
+                    }
+                }
+
+                return result;
+            } catch (error) {
+                console.error('Session validation error:', error);
+                return { valid: false, error: error.message };
+            }
+        }
+
+        // Function to get fresh token with retry logic
+        async function getFreshToken() {
+            if (!currentUser) {
+                console.log('No current user for token refresh');
+                return null;
+            }
+            
+            try {
+                // Force refresh the token
+                console.log('Getting fresh Firebase token...');
+                idToken = await currentUser.getIdToken(true);
+                localStorage.setItem('firebase_token', idToken);
+                console.log('Token refreshed successfully');
+                return idToken;
+            } catch (error) {
+                console.error('Error refreshing token:', error);
+                
+                // If token refresh fails, try to re-authenticate
+                if (error.code === 'auth/network-request-failed') {
+                    console.log('Network error, will retry token refresh');
+                    // Don't sign out for network errors, just return null
+                    return null;
+                } else {
+                    console.error('Token refresh failed, signing out user');
+                    // For other errors, sign out the user
+                    return null;
+                }
+            }
+        }
+
+        function showMainContent(user) {
+            document.getElementById('auth-required').style.display = 'none';
+            document.getElementById('main-content').style.display = 'block';
+            document.getElementById('user-info').style.display = 'flex';
+            document.getElementById('user-email').textContent = user.email;
+        }
+
+        function showAuthRequired() {
+            document.getElementById('auth-required').style.display = 'block';
+            document.getElementById('main-content').style.display = 'none';
+        }
+
+        function logout() {
+            auth.signOut().then(() => {
+                console.log('User signed out');
+            }).catch((error) => {
+                console.error('Sign out error:', error);
+            });
+        }
+
+        async function refreshSession() {
+            showStatus('Manually refreshing session...', 'refreshing');
+            
+            try {
+                const freshToken = await getFreshToken();
+                if (freshToken) {
+                    showStatus('Session manually refreshed', 'online');
+                    
+                    // Validate the new session
+                    const sessionCheck = await validateSession();
+                    if (sessionCheck.valid) {
+                        console.log('Session validation successful after manual refresh');
+                    } else {
+                        throw new Error('Session validation failed after refresh');
+                    }
+                } else {
+                    throw new Error('Failed to refresh session');
+                }
+            } catch (error) {
+                console.error('Manual refresh error:', error);
+                showStatus('Manual refresh failed', 'error');
+                setTimeout(() => {
+                    alert('Failed to refresh session. You may need to sign in again.');
+                }, 1000);
+            }
+        }
+
+        // Handle Google Sign-In from main page
+        document.getElementById('google-sign-in-main').addEventListener('click', async (e) => {
+            e.preventDefault();
+            
+            try {
+                showStatus('Signing in with Google...', 'refreshing');
+                const result = await auth.signInWithPopup(googleProvider);
+                console.log('Google sign-in successful:', result.user.email);
+                
+                // Get fresh token immediately after sign-in
+                const token = await result.user.getIdToken(true);
+                console.log('Got ID token after Google sign-in:', token.substring(0, 50) + '...');
+                localStorage.setItem('firebase_token', token);
+                
+                showStatus('Google sign-in successful!', 'online');
+                
+            } catch (error) {
+                console.error('Google sign-in error:', error);
+                showStatus('Google sign-in failed', 'error');
+                
+                if (error.code === 'auth/popup-closed-by-user') {
+                    // Don't show error for user cancellation
+                    hideStatus();
+                } else if (error.code === 'auth/popup-blocked') {
+                    alert('Popup was blocked. Please allow popups and try again.');
+                } else {
+                    alert(`Sign-in error: ${error.message}`);
+                }
+            }
+        });
+
+        // Handle file upload with retry logic
+        document.getElementById('upload-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            if (!currentUser) {
+                alert('Please sign in first');
+                return;
+            }
+
+            const formData = new FormData(e.target);
+            const resultDiv = document.getElementById('upload-result');
+            const resultContent = document.getElementById('result-content');
+            
+            resultContent.textContent = 'Validating session...';
+            resultDiv.style.display = 'block';
+            
+            // Validate session before starting upload
+            showStatus('Validating session...', 'refreshing');
+            const sessionCheck = await validateSession();
+            if (!sessionCheck.valid) {
+                resultContent.textContent = `Session validation failed: ${sessionCheck.error}`;
+                showStatus('Session validation failed', 'error');
+                setTimeout(() => {
+                    if (sessionCheck.error.includes('expired') || sessionCheck.error.includes('invalid')) {
+                        auth.signOut();
+                    }
+                }, 2000);
+                return;
+            }
+            
+            resultContent.textContent = 'Processing...';
+            
+            // Function to attempt upload with fresh token
+            const attemptUpload = async (retryCount = 0) => {
+                try {
+                    // Get fresh token before making request
+                    const freshToken = await getFreshToken();
+                    if (!freshToken) {
+                        if (retryCount < 2) {
+                            console.log(`Token refresh failed, retrying... (${retryCount + 1}/2)`);
+                            setTimeout(() => attemptUpload(retryCount + 1), 1000);
+                            return;
+                        } else {
+                            throw new Error('Authentication failed after retries. Please sign in again.');
+                        }
+                    }
+
+                    // Show processing status
+                    showStatus('Uploading and processing...', 'refreshing');
+
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${freshToken}`
+                        },
+                        body: formData
+                    });
+                    
+                    if (response.status === 401) {
+                        if (retryCount < 2) {
+                            console.log(`Request failed with 401, retrying with fresh token... (${retryCount + 1}/2)`);
+                            showStatus('Retrying with fresh token...', 'refreshing');
+                            // Try to get a fresh token and retry
+                            setTimeout(() => attemptUpload(retryCount + 1), 1000);
+                            return;
+                        } else {
+                            throw new Error('Session expired. Please sign in again.');
+                        }
+                    }
+                    
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({}));
+                        throw new Error(errorData.message || `Server error: ${response.status} ${response.statusText}`);
+                    }
+                    
+                    const result = await response.json();
+                    resultContent.textContent = JSON.stringify(result, null, 2);
+                    
+                    if (result.success) {
+                        // Clear form
+                        e.target.reset();
+                        console.log('Upload successful');
+                        showStatus('Upload completed successfully!', 'online');
+                    } else if (result.warning) {
+                        showStatus('Upload processed with warning', 'refreshing');
+                        console.warn('Upload warning:', result.warning);
+                    } else {
+                        showStatus('Upload failed', 'error');
+                    }
+                    
+                } catch (error) {
+                    console.error('Upload error:', error);
+                    resultContent.textContent = `Error: ${error.message}`;
+                    showStatus(`Upload failed: ${error.message}`, 'error');
+                    
+                    if (error.message.includes('sign in again') || error.message.includes('expired')) {
+                        setTimeout(() => {
+                            auth.signOut();
+                        }, 2000);
+                    }
+                }
+            };
+            
+            await attemptUpload();
+        });
+
+        // Update receipts link to include auth header with retry logic
+        document.getElementById('view-receipts-link').addEventListener('click', async (e) => {
+            e.preventDefault();
+            
+            if (!currentUser) {
+                alert('Please sign in first');
+                return;
+            }
+
+            // Function to attempt receipts fetch with fresh token
+            const attemptFetchReceipts = async (retryCount = 0) => {
+                try {
+                    // Get fresh token before making request
+                    const freshToken = await getFreshToken();
+                    if (!freshToken) {
+                        if (retryCount < 2) {
+                            console.log(`Token refresh failed, retrying... (${retryCount + 1}/2)`);
+                            setTimeout(() => attemptFetchReceipts(retryCount + 1), 1000);
+                            return;
+                        } else {
+                            throw new Error('Authentication failed after retries. Please sign in again.');
+                        }
+                    }
+
+                    const response = await fetch('/receipts', {
+                        headers: {
+                            'Authorization': `Bearer ${freshToken}`
+                        }
+                    });
+                    
+                    if (response.status === 401) {
+                        if (retryCount < 2) {
+                            console.log(`Request failed with 401, retrying with fresh token... (${retryCount + 1}/2)`);
+                            setTimeout(() => attemptFetchReceipts(retryCount + 1), 1000);
+                            return;
+                        } else {
+                            throw new Error('Session expired. Please sign in again.');
+                        }
+                    }
+                    
+                    const result = await response.json();
+                    
+                    // Open results in new window
+                    const newWindow = window.open();
+                    newWindow.document.write(`<pre>${JSON.stringify(result, null, 2)}</pre>`);
+                    
+                } catch (error) {
+                    console.error('Receipts fetch error:', error);
+                    alert(`Error fetching receipts: ${error.message}`);
+                    
+                    if (error.message.includes('sign in again')) {
+                        setTimeout(() => {
+                            auth.signOut();
+                        }, 2000);
+                    }
+                }
+            };
+            
+            await attemptFetchReceipts();
+        });
+    </script>
+</body>
+</html>

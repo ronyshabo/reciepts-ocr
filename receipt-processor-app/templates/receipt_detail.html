@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receipt Details</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .receipt-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        }
+        .section {
+            background: #f9f9f9;
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #007bff;
+        }
+        .section h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .item:last-child {
+            border-bottom: none;
+        }
+        .summary-row {
+            display: flex;
+            justify-content: space-between;
+            font-weight: bold;
+            margin: 5px 0;
+        }
+        .total {
+            font-size: 1.2em;
+            color: #007bff;
+        }
+        .raw-text {
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="receipt-container">
+        <h1>Receipt Details</h1>
+        
+        {% if receipt %}
+            <div class="section">
+                <h3>Store Information</h3>
+                <p><strong>Name:</strong> {{ receipt.store.name or 'N/A' }}</p>
+                <p><strong>Location:</strong> {{ receipt.store.location or 'N/A' }}</p>
+                <p><strong>Phone:</strong> {{ receipt.store.phone or 'N/A' }}</p>
+            </div>
+            
+            <div class="section">
+                <h3>Receipt Details</h3>
+                <p><strong>Date:</strong> {{ receipt.receipt.date or 'N/A' }}</p>
+                <p><strong>Time:</strong> {{ receipt.receipt.time or 'N/A' }}</p>
+                <p><strong>Cashier:</strong> {{ receipt.receipt.cashier or 'N/A' }}</p>
+                <p><strong>Receipt ID:</strong> {{ receipt.receipt.receipt_id or 'N/A' }}</p>
+            </div>
+            
+            <div class="section">
+                <h3>Items Purchased</h3>
+                {% for item in receipt.items %}
+                    <div class="item">
+                        <span>{{ item.name }} ({{ item.quantity }}x)</span>
+                        <span>${{ "%.2f"|format(item.total) }}</span>
+                    </div>
+                {% endfor %}
+            </div>
+            
+            <div class="section">
+                <h3>Summary</h3>
+                <div class="summary-row">
+                    <span>Items:</span>
+                    <span>{{ receipt.summary.items_purchased or 0 }}</span>
+                </div>
+                <div class="summary-row">
+                    <span>Subtotal:</span>
+                    <span>${{ "%.2f"|format(receipt.summary.subtotal or 0) }}</span>
+                </div>
+                {% if receipt.summary.savings %}
+                <div class="summary-row">
+                    <span>Savings:</span>
+                    <span>${{ "%.2f"|format(receipt.summary.savings) }}</span>
+                </div>
+                {% endif %}
+                <div class="summary-row total">
+                    <span>Total:</span>
+                    <span>${{ "%.2f"|format(receipt.summary.total or 0) }}</span>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h3>Payment Information</h3>
+                <p><strong>Method:</strong> {{ receipt.payment.method or 'N/A' }}</p>
+                <p><strong>Amount:</strong> ${{ "%.2f"|format(receipt.payment.amount or 0) }}</p>
+            </div>
+            
+            {% if receipt.metadata.raw_ocr_text %}
+            <div class="section">
+                <h3>Raw OCR Text</h3>
+                <div class="raw-text">{{ receipt.metadata.raw_ocr_text }}</div>
+            </div>
+            {% endif %}
+            
+        {% else %}
+            <div class="section">
+                <h3>Receipt not found</h3>
+                <p>The requested receipt could not be found.</p>
+            </div>
+        {% endif %}
+        
+        <div style="text-align: center; margin-top: 30px;">
+            <a href="{{ url_for('index') }}">← Upload Another Receipt</a>
+            <span style="margin: 0 20px;">|</span>
+            <a href="/receipts">View All Receipts (JSON)</a>
+        </div>
+    </div>
+</body>
+</html>
