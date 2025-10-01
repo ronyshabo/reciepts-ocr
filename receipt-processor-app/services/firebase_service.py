@@ -3,6 +3,7 @@ from firebase_admin import credentials, firestore, auth
 import os
 from datetime import datetime
 import json
+import time
 
 # Firebase configuration
 FIREBASE_CONFIG = {
@@ -175,63 +176,91 @@ def verify_firebase_token(id_token):
     """
     Verify Firebase ID token and return user info
     """
-    try:
-        if not id_token:
+    max_attempts = 2
+    delay_seconds = 2
+    attempt = 0
+    last_error = None
+    while attempt < max_attempts:
+        try:
+            if not id_token:
+                return {
+                    'success': False,
+                    'error': 'Empty token',
+                    'message': 'ID token is empty or None'
+                }
+
+            # Ensure Firebase is initialized
+            db = initialize_firebase()
+            if db is None:
+                return {
+                    'success': False,
+                    'error': 'Firebase not initialized',
+                    'message': 'Firebase Admin SDK is not properly initialized'
+                }
+
+            print(f"Verifying token (attempt {attempt+1}) for user: {id_token[:50]}...")
+            decoded_token = auth.verify_id_token(id_token)
+            print(f"Token verified successfully for user: {decoded_token.get('email')}")
+
+            return {
+                'success': True,
+                'user_id': decoded_token['uid'],
+                'email': decoded_token.get('email'),
+                'name': decoded_token.get('name'),
+                'exp': decoded_token.get('exp'),
+                'iat': decoded_token.get('iat')
+            }
+
+        except auth.ExpiredIdTokenError as e:
+            print(f"Token expired error: {str(e)}")
             return {
                 'success': False,
-                'error': 'Empty token',
-                'message': 'ID token is empty or None'
+                'error': 'Token expired',
+                'message': 'Firebase ID token has expired. Please refresh your session.'
             }
-        
-        # Ensure Firebase is initialized
-        db = initialize_firebase()
-        if db is None:
+        except auth.RevokedIdTokenError as e:
+            print(f"Token revoked error: {str(e)}")
             return {
                 'success': False,
-                'error': 'Firebase not initialized',
-                'message': 'Firebase Admin SDK is not properly initialized'
+                'error': 'Token revoked', 
+                'message': 'Firebase ID token has been revoked. Please sign in again.'
             }
-            
-        print(f"Verifying token for user: {id_token[:50]}...")  # Debug log
-        decoded_token = auth.verify_id_token(id_token)
-        print(f"Token verified successfully for user: {decoded_token.get('email')}")  # Debug log
-        
-        return {
-            'success': True,
-            'user_id': decoded_token['uid'],
-            'email': decoded_token.get('email'),
-            'name': decoded_token.get('name'),
-            'exp': decoded_token.get('exp'),
-            'iat': decoded_token.get('iat')
-        }
-    except auth.ExpiredIdTokenError as e:
-        print(f"Token expired error: {str(e)}")
-        return {
-            'success': False,
-            'error': 'Token expired',
-            'message': 'Firebase ID token has expired. Please refresh your session.'
-        }
-    except auth.RevokedIdTokenError as e:
-        print(f"Token revoked error: {str(e)}")
-        return {
-            'success': False,
-            'error': 'Token revoked', 
-            'message': 'Firebase ID token has been revoked. Please sign in again.'
-        }
-    except auth.InvalidIdTokenError as e:
-        print(f"Invalid token error: {str(e)}")
-        return {
-            'success': False,
-            'error': 'Invalid token',
-            'message': f'Firebase ID token is invalid: {str(e)}'
-        }
-    except Exception as e:
-        print(f"General token verification error: {str(e)}")
-        return {
-            'success': False,
-            'error': 'Verification failed',
-            'message': f'Failed to verify Firebase ID token: {str(e)}'
-        }
+        except auth.InvalidIdTokenError as e:
+            err_msg = str(e)
+            print(f"Invalid token error: {err_msg}")
+            # Retry on minor clock skew: 'Token used too early'
+            if 'Token used too early' in err_msg and attempt + 1 < max_attempts:
+                print(f"Detected clock skew (token used too early). Retrying in {delay_seconds}s...")
+                time.sleep(delay_seconds)
+                attempt += 1
+                last_error = e
+                continue
+            return {
+                'success': False,
+                'error': 'Invalid token',
+                'message': f'Firebase ID token is invalid: {err_msg}'
+            }
+        except Exception as e:
+            err_msg = str(e)
+            print(f"General token verification error: {err_msg}")
+            # Optional retry on early-use message even if thrown as generic exception
+            if 'Token used too early' in err_msg and attempt + 1 < max_attempts:
+                print(f"Detected clock skew (token used too early). Retrying in {delay_seconds}s...")
+                time.sleep(delay_seconds)
+                attempt += 1
+                last_error = e
+                continue
+            return {
+                'success': False,
+                'error': 'Verification failed',
+                'message': f'Failed to verify Firebase ID token: {err_msg}'
+            }
+    # If we looped without returning success, surface last error with guidance
+    return {
+        'success': False,
+        'error': 'Clock skew',
+        'message': 'Token used too early due to small clock skew. Please ensure system time is synced (timedatectl set-ntp true) and try again.'
+    }
 
 def save_receipt_data(receipt_data, user_id):
     """
@@ -252,16 +281,49 @@ def save_receipt_data(receipt_data, user_id):
         # Add user information
         formatted_data['user_id'] = user_id
         formatted_data['metadata']['user_id'] = user_id
-        
-        # Add to user's receipts subcollection
-        doc_ref = db.collection('users').document(user_id).collection('receipts').add(formatted_data)
-        
-        # Also add to global receipts collection for admin purposes (optional)
-        db.collection('receipts').add({**formatted_data, 'document_id': doc_ref[1].id})
-        
+
+        # Build friendly document ID: "vendor, YYYY-MM-DD"
+        def slug_vendor(name: str) -> str:
+            if not name:
+                return 'unknown'
+            n = name.lower().strip()
+            n = n.replace('h-e-b', 'heb').replace('h‑e‑b', 'heb').replace('h–e–b', 'heb')
+            n = n.replace('&', 'and')
+            # keep alphanum and spaces/hyphens
+            import re as _re
+            n = _re.sub(r'[^a-z0-9\s-]', '', n)
+            n = _re.sub(r'\s+', ' ', n).strip()
+            n = n.replace(' ', '-')
+            return n
+
+        vendor_slug = slug_vendor(formatted_data.get('store', {}).get('name'))
+        purchase_date = formatted_data.get('receipt', {}).get('date') or 'unknown-date'
+        # Sanitize date (avoid slashes)
+        purchase_date = purchase_date.replace('/', '-').strip()
+        base_doc_id = f"{vendor_slug}, {purchase_date}"
+
+        # Ensure no illegal '/' characters
+        base_doc_id = base_doc_id.replace('/', '-').strip()
+
+        # Collision-safe: append -2, -3, ... if needed in user's collection
+        user_col = db.collection('users').document(user_id).collection('receipts')
+        doc_id = base_doc_id
+        suffix = 2
+        while user_col.document(doc_id).get().exists:
+            doc_id = f"{base_doc_id}-{suffix}"
+            suffix += 1
+
+        # Save to user's collection with chosen doc_id
+        user_col.document(doc_id).set(formatted_data)
+
+        # Save to global receipts: avoid collisions across users by appending a short uid
+        global_doc_id = f"{doc_id}__{user_id[:6]}"
+        db.collection('receipts').document(global_doc_id).set({**formatted_data, 'document_id': doc_id})
+
         return {
             'success': True,
-            'document_id': doc_ref[1].id,
+            'document_id': doc_id,
+            'global_document_id': global_doc_id,
             'message': 'Receipt saved successfully',
             'formatted_data': formatted_data
         }

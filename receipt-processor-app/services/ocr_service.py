@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 import logging
 from logging.handlers import RotatingFileHandler
 import uuid
+from .ocr.detector import detect_merchant
+from .ocr.parsers import parse_by_merchant
 
 # Load environment variables
 load_dotenv()
@@ -809,7 +811,9 @@ def process_receipt(image_path):
         ocr_logger.info(f"[{corr_id}] 🔧 NORMALIZING TEXT")
         normalized_text = normalize_ocr_text(extracted_text)
         ocr_logger.info(f"[{corr_id}] 🔍 PARSING EXTRACTED TEXT")
-        receipt_data = parse_receipt_text(normalized_text)
+        merchant = detect_merchant(normalized_text)
+        ocr_logger.info(f"[{corr_id}] 🏷️ Detected merchant: {merchant}")
+        receipt_data = parse_by_merchant(normalized_text, merchant)
 
         # Add raw and normalized OCR text and correlation id for debugging
         receipt_data["raw_ocr_text"] = extracted_text
